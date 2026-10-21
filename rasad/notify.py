@@ -15,7 +15,7 @@ from . import db
 from .config import settings
 
 TYPES = {"telegram": "تلگرام", "webhook": "وب‌هوک (JSON/Slack)", "email": "ایمیل (SMTP)"}
-SECRET_KEYS = {"bot_token", "password", "url"}
+SECRET_KEYS = {"bot_token", "password", "url", "header_value"}
 SEV = {"info": 0, "warning": 1, "critical": 2}
 SEV_FA = {"info": "اطلاع", "warning": "هشدار", "critical": "بحرانی"}
 
@@ -134,13 +134,13 @@ def _h(s):
 
 def _deliver(ch, ref, title, text, link=None, payload=None, force=False):
     with _lock:
-        if not force and db.q1("SELECT 1 FROM deliveries WHERE channel_id=? AND ref=?", (ch["id"], ref)):
+        if not force and db.q1("SELECT 1 FROM deliveries WHERE channel_id=? AND ref=? AND ok=1", (ch["id"], ref)):
             return None
         try:
             _send(ch, title, text, link, payload)
             ok, err = 1, None
         except Exception as e:  # noqa: BLE001
-            ok, err = 0, str(e)[:300]
+            ok, err = 0, "delivery failed: " + type(e).__name__
         with db.tx() as c:
             c.execute("""INSERT INTO deliveries(ts,channel_id,ref,title,ok,error) VALUES(?,?,?,?,?,?)
                          ON CONFLICT(channel_id,ref) DO UPDATE SET ts=excluded.ts,ok=excluded.ok,error=excluded.error""",
@@ -246,7 +246,7 @@ def digest_text(hours=24, top=8):
     since = time.time() - hours * 3600
     stories = db.q("""SELECT id,title,title_fa,source_count,lang_count,urgency FROM stories WHERE last_update>?
                       ORDER BY score DESC LIMIT ?""", (since, top))
-    sigs = db.q("""SELECT label,severity FROM signals WHERE created>? AND severity IN ('warning','critical')
+    sigs = db.q("""SELECT label,severity FROM signals WHERE created>? AND severity IN ('warning','critical') AND status IN ('new','approved')
                    ORDER BY CASE severity WHEN 'critical' THEN 0 ELSE 1 END, score DESC LIMIT 6""", (since,))
     n_art = db.q1("SELECT COUNT(*) n FROM articles WHERE published_at>? AND duplicate_of IS NULL", (since,))["n"]
     lines = [f"{n_art} خبر یکتا · {len(stories)} داستان برتر · {len(sigs)} هشدار در {hours} ساعت گذشته", ""]

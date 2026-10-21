@@ -119,7 +119,7 @@ def test_watchlist_match_and_sources_opml_backup_metrics():
         assert c.get("/api/export/articles.csv?hours=1").text.startswith("\ufeffid,source")
         assert "<gexf" in c.get("/api/graph/export.gexf").text
         assert c.post("/api/system/retention", json={"days": 1}).status_code == 400
-        assert c.get("/api/system/info").json()["version"] == "0.4.0"
+        assert c.get("/api/system/info").json()["version"] == "0.5.0"
 
 
 def test_frontend_assets_served():

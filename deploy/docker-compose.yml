@@ -10,6 +10,7 @@ services:
     env_file: [../.env]
     environment:
       RASAD_DB: /data/rasad.db
+      RASAD_BACKUP_DIR: /data/backups
     volumes: [rasad-data:/data]
   ollama:
     image: ollama/ollama:latest

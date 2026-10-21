@@ -11,7 +11,7 @@ from . import db
 from .config import settings
 
 START = time.time()
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 
 
 # ---------------- backups ----------------

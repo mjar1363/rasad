@@ -1,5 +1,6 @@
 """AI task library used by agents and API. Every function batches work to amortise provider overhead,
 uses short numeric ids in prompts, validates output against inputs, and never invents citations."""
+import hashlib
 import re
 import time
 
@@ -38,7 +39,7 @@ def story_articles(sid, n=4, chars=500):
 
 
 def _art_txt(a, chars=450):
-    body = (a["lead"] or "") if len(a["lead"] or "") > 80 else (a["text"] or a["lead"] or "")
+    body = a["text"] or a["lead"] or ""
     return f"{a['title']} — {body[:chars]}"
 
 
@@ -101,7 +102,7 @@ def resolve_entity(e):
     for gid, g in ENTITY.items():
         if en and normalize(g["name_en"]) == en or fa_ and normalize(g["name_fa"]) == fa_:
             return gid, True
-    return "X:" + (_slug(e.get("name_en")) or _slug(e.get("name_fa")) or str(abs(hash(fa_)))), False
+    return "X:" + (_slug(e.get("name_en")) or _slug(e.get("name_fa")) or hashlib.sha256(fa_.encode("utf-8")).hexdigest()[:24]), False
 
 
 # ---------------- dedup ----------------
@@ -274,9 +275,6 @@ def retrieve(question, k=14, hours=168):
                       % ",".join("?" * len(ents)), (*ents, since, k)):
             if r["id"] not in seen:
                 seen.add(r["id"]); rows.append(r["id"])
-    if not rows:  # fall back to top stories
-        rows = [r["id"] for r in db.q("""SELECT a.id FROM stories s JOIN articles a ON a.story_id=s.id AND a.duplicate_of IS NULL
-                                          WHERE s.last_update>? GROUP BY s.id ORDER BY s.score DESC LIMIT ?""", (time.time() - 24 * 3600, k))]
     rows = rows[:k]
     if not rows:
         return []
@@ -293,7 +291,7 @@ ASK_SYSTEM = ("تو «دستیار تحلیلی رصد» هستی و فقط بر
 
 def ask_context(arts):
     return "\n".join(f"[{i+1}] ({a['sname']}, {a['lang']}, {time.strftime('%Y-%m-%d %H:%M', time.localtime(a['published_at']))}) "
-                     f"{a['title']}" + (f" | {a['title_fa']}" if a.get("title_fa") and a["lang"] != "fa" else "") + f" — {((a['lead'] or '') if len(a['lead'] or '') > 80 else (a['text'] or a['lead'] or ''))[:600]}"
+                     f"{a['title']}" + (f" | {a['title_fa']}" if a.get("title_fa") and a["lang"] != "fa" else "") + f" — {(a['text'] or a['lead'] or '')[:600]}"
                      for i, a in enumerate(arts))
 
 

@@ -141,6 +141,7 @@ class PatternAnomaly(Agent):
         except Exception as e:  # noqa: BLE001
             ctx.log(f"watchlists: {e}", "warn")
         new = 0
+        critical_ids = []
         with db.tx() as c:
             for g in sigs:
                 expl = {"text": g.get("explain") or g["label"], "kind": "inference", "confidence": "medium" if g["severity"] == "warning" else "high",
@@ -150,6 +151,10 @@ class PatternAnomaly(Agent):
                                 (g["type"], g["key"], g["label"], g["score"], g["baseline"], g["observed"], g["window"], g["severity"],
                                  db.jdump(g.get("story_ids", [])), db.jdump(expl), "pending" if g["severity"] == "critical" else "new", now))
                 new += cur.rowcount
+                if g["severity"] == "critical":
+                    row = c.execute("SELECT id FROM signals WHERE type=? AND key=? AND status='pending'", (g["type"], g["key"])).fetchone()
+                    if row:
+                        critical_ids.append(row[0])
         ctx.state["critical_signals"] = [g for g in sigs if g["severity"] == "critical"]
         explained = 0
         if llm.agent_enabled("anomaly"):
@@ -177,7 +182,7 @@ class PatternAnomaly(Agent):
         return {"summary": f"{len(sigs)} سیگنال ({new} جدید، {crit} بحرانی){cold}" + (f"؛ {explained} سیگنال با توضیح مدل زبانی" if explained else ""), "input_summary": f"{len(rows)} خبر ۴۸ ساعت اخیر",
                 "output": {"signals": sigs[:30]},
                 "reasoning": "z-score حجم ساعتی (۳ ساعت اخیر در برابر ۴۵ ساعت قبل)، نسبت نرخ اشاره به موجودیت (۶ در برابر ۴۲ ساعت)، و گسترش داستان در ≥۴ گروه مالکیت مستقل ظرف ۳ ساعت. هشدار بحرانی در حالت نظارتی منتظر تأیید می‌ماند. مدل زبانی برای هر سیگنال جدید علت محتمل، دو فرضیه جایگزین و نشانگر پایش می‌نویسد (برچسب استنباط).",
-                "approval": {"kind": "alerts", "items": [g["label"] for g in ctx.state["critical_signals"]]} if crit else None}
+                "approval": {"kind": "alerts", "signal_ids": critical_ids, "items": [g["label"] for g in ctx.state["critical_signals"]]} if crit else None}
 
 
 class Verifier(Agent):

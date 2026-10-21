@@ -2,6 +2,7 @@ import asyncio
 import json
 import time
 from collections import Counter, defaultdict
+from contextlib import asynccontextmanager
 
 from fastapi import Body, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
@@ -14,17 +15,28 @@ from .supervisor import bus
 from .taxonomy import ENTITY, TOPICS
 from .text import normalize
 
-app = FastAPI(title="Rasad · رصد", version="0.4.0")
-
-
-@app.on_event("startup")
-async def _startup():
+@asynccontextmanager
+async def lifespan(app):
     db.init()
     from .agents.ingest import sync_sources
+    from .analysis.jobs import worker
     sync_sources()
     s = sup_mod.get()
-    asyncio.create_task(s.scheduler())
-    asyncio.create_task(_digest_ticker())
+    tasks = [asyncio.create_task(s.scheduler()), asyncio.create_task(_digest_ticker()),
+             asyncio.create_task(worker())]
+    try:
+        yield
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        # A running synchronous analysis call may finish after cancellation; leases
+        # and checkpoints make it resumable on restart. Run one ASGI process.
+
+
+app = FastAPI(title="Rasad · رصد", version="0.5.0", lifespan=lifespan)
+from .analysis.routes import router as analysis_router
+app.include_router(analysis_router)
 
 
 async def _digest_ticker():
@@ -427,10 +439,16 @@ async def ask(body: dict = Body(...)):
     if not question:
         raise HTTPException(400, "question required")
 
+    chat_user_id = (auth.current_user.get() or {}).get("id", 0)
+
     async def gen():
         if not llm.agent_enabled("ask"):
             yield _sse({"type": "error", "error": "دستیار تحلیلی غیرفعال است یا سقف توکن روزانه تمام شده؛ تنظیمات هوش مصنوعی را بررسی کنید."}); return
         arts = await asyncio.to_thread(ai.retrieve, question, 14, hours)
+        if not arts:
+            yield _sse({"type": "delta", "text": "شواهد مرتبط کافی در بازه درخواستی یافت نشد."})
+            yield _sse({"type": "done", "chat_id": None, "used": []})
+            return
         cites = [{"n": i + 1, "id": a["id"], "story_id": a["story_id"], "source": a["sname"], "title": a.get("title_fa") or a["title"],
                   "url": a["url"], "lang": a["lang"], "t": a["published_at"]} for i, a in enumerate(arts)]
         yield _sse({"type": "sources", "items": cites})
@@ -446,8 +464,8 @@ async def ask(body: dict = Body(...)):
         ans = "".join(out)
         used = sorted({int(n) for n in __import__("re").findall(r"\[(\d+)\]", ans) if 1 <= int(n) <= len(cites)})
         with db.tx() as c:
-            cur = c.execute("INSERT INTO chats(ts,question,answer,citations,tokens) VALUES(?,?,?,?,?)",
-                            (time.time(), question, ans, db.jdump([x for x in cites if x["n"] in used]), 0))
+            cur = c.execute("INSERT INTO chats(ts,question,answer,citations,tokens,user_id) VALUES(?,?,?,?,?,?)",
+                            (time.time(), question, ans, db.jdump([x for x in cites if x["n"] in used]), 0, chat_user_id))
         yield _sse({"type": "done", "chat_id": cur.lastrowid, "used": used})
 
     return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
@@ -455,7 +473,7 @@ async def ask(body: dict = Body(...)):
 
 @app.get("/api/ask/history")
 def ask_history(limit: int = 20):
-    return [dict(r, citations=db.jload(r["citations"], [])) for r in db.q("SELECT * FROM chats ORDER BY id DESC LIMIT ?", (limit,))]
+    return [dict(r, citations=db.jload(r["citations"], [])) for r in db.q("SELECT * FROM chats WHERE user_id=? ORDER BY id DESC LIMIT ?", ((auth.current_user.get() or {}).get("id", 0), max(1,min(limit,100))))]
 
 
 @app.post("/api/stories/{sid}/analyze")
