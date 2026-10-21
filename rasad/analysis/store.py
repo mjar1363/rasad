@@ -42,6 +42,22 @@ CREATE TABLE IF NOT EXISTS analysis_calls(
  id TEXT PRIMARY KEY, job_id TEXT NOT NULL, stage TEXT NOT NULL, prompt_version TEXT NOT NULL,
  input_hash TEXT NOT NULL, model TEXT NOT NULL, provider TEXT NOT NULL, schema_mode TEXT NOT NULL,
  tokens INTEGER NOT NULL, created REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS analysis_stage_results(
+ job_id TEXT NOT NULL, cache_key TEXT NOT NULL, stage TEXT NOT NULL, result TEXT NOT NULL, created REAL NOT NULL,
+ PRIMARY KEY(job_id,cache_key));
+CREATE TABLE IF NOT EXISTS analysis_validation_leases(
+ report_id TEXT PRIMARY KEY, revision INTEGER NOT NULL, token TEXT NOT NULL, expires REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS analysis_report_history(
+ report_id TEXT NOT NULL, revision INTEGER NOT NULL, body TEXT NOT NULL, quality TEXT NOT NULL,
+ status TEXT NOT NULL, created REAL NOT NULL, archived_by INTEGER NOT NULL, note TEXT NOT NULL,
+ PRIMARY KEY(report_id,revision));
+CREATE TABLE IF NOT EXISTS analysis_review_assignments(
+ report_id TEXT PRIMARY KEY, reviewer_id INTEGER NOT NULL, assigned_by INTEGER NOT NULL, created REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS document_provenance(
+ id TEXT PRIMARY KEY, owner_id INTEGER NOT NULL, child_id TEXT NOT NULL, parent_id TEXT NOT NULL,
+ relation TEXT NOT NULL, note TEXT NOT NULL, actor_id INTEGER NOT NULL, created REAL NOT NULL,
+ UNIQUE(owner_id,child_id,parent_id,relation));
+
 """
 
 
@@ -49,6 +65,7 @@ def init():
     with db.tx() as c:
         c.executescript(SCHEMA)
         c.execute("INSERT OR IGNORE INTO analysis_schema VALUES(1,?)", (time.time(),))
+        c.execute("INSERT OR IGNORE INTO analysis_schema VALUES(2,?)", (time.time(),))
 
 
 def digest(text):
@@ -64,9 +81,26 @@ def allowed(row, user):
     return bool(row and user and (row["owner_id"] == user["id"] or user["role"] == "admin"))
 
 
+def assigned(report_id, user):
+    return bool(user and user.get("role") in ("analyst", "admin") and db.q1(
+        "SELECT 1 FROM analysis_review_assignments WHERE report_id=? AND reviewer_id=?", (report_id, user["id"])))
+
+
+def review_job(job_id, user):
+    return bool(user and user.get("role") in ("analyst", "admin") and db.q1(
+        "SELECT 1 FROM analysis_review_assignments a JOIN analysis_reports r ON r.id=a.report_id WHERE r.job_id=? AND a.reviewer_id=?", (job_id, user["id"])))
+
+
+def review_document(doc_id, user):
+    return bool(user and user.get("role") in ("analyst", "admin") and db.q1(
+        """SELECT 1 FROM analysis_review_assignments a JOIN analysis_reports r ON r.id=a.report_id
+        JOIN analysis_jobs j ON j.id=r.job_id WHERE a.reviewer_id=? AND
+        EXISTS(SELECT 1 FROM json_each(j.manifest,'$.documents') WHERE json_extract(value,'$.id')=?)""", (user["id"], doc_id)))
+
+
 def document(doc_id, user):
     row = db.q1("SELECT * FROM document_versions WHERE id=?", (doc_id,))
-    if not row or not (row["owner_id"] == -1 or allowed(row, user)):
+    if not row or not (row["owner_id"] == -1 or allowed(row, user) or review_document(doc_id, user)):
         raise KeyError(doc_id)
     row["metadata"] = db.jload(row["metadata"], {})
     return row
@@ -134,7 +168,7 @@ def anchor(citation, chunks):
 
 def get_job(job_id, user):
     row = db.q1("SELECT * FROM analysis_jobs WHERE id=?", (job_id,))
-    if not allowed(row, user):
+    if not (allowed(row, user) or review_job(job_id, user)):
         raise KeyError(job_id)
     for key in ("request", "manifest", "extraction"):
         row[key] = db.jload(row[key], {} if key != "extraction" else [])
@@ -143,10 +177,12 @@ def get_job(job_id, user):
 
 def get_report(report_id, user):
     row = db.q1("SELECT * FROM analysis_reports WHERE id=?", (report_id,))
-    if not allowed(row, user):
+    if not (allowed(row, user) or assigned(report_id, user)):
         raise KeyError(report_id)
     row["body"], row["quality"] = db.jload(row["body"], {}), db.jload(row["quality"], {})
     row["reviews"] = db.q("SELECT revision,actor_id,decision,note,created FROM analysis_reviews WHERE report_id=? ORDER BY id", (report_id,))
+    row["validation_lease"] = db.q1("SELECT revision,expires FROM analysis_validation_leases WHERE report_id=?", (report_id,))
+    row["assignment"] = db.q1("SELECT reviewer_id,assigned_by,created FROM analysis_review_assignments WHERE report_id=?", (report_id,))
     row["calls"] = db.q("SELECT stage,prompt_version,input_hash,model,provider,schema_mode,tokens,created FROM analysis_calls WHERE job_id=? ORDER BY created", (row["job_id"],))
     return row
 

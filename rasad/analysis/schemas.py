@@ -87,3 +87,36 @@ class StatementCheck(Contract):
 
 class QualityChecks(Contract):
     items: list[StatementCheck]
+
+
+class ExternalDocument(Contract):
+    url: str = Field(min_length=10, max_length=2000)
+    title: str = Field(min_length=1, max_length=500)
+    source_type: Literal["primary_claimed", "secondary", "unknown"] = "unknown"
+
+
+class Provenance(Contract):
+    child_id: str
+    parent_id: str
+    relation: Literal["republication", "cites", "translation", "same_origin_claimed"]
+    note: str = Field(min_length=3, max_length=4000)
+
+
+class Followup(Contract):
+    document_ids: list[str] = Field(min_length=1, max_length=6)
+    question: str = Field(default="", max_length=1200)
+
+
+class Revision(Contract):
+    revision: int = Field(ge=1)
+    statements: list[Statement] = Field(min_length=1, max_length=16)
+    limitations: list[str] = Field(max_length=50)
+    note: str = Field(min_length=3, max_length=4000)
+
+
+class Assignment(Contract):
+    reviewer_id: int | None
+
+
+class RevisionNumber(Contract):
+    revision: int = Field(ge=1)
