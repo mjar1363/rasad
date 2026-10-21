@@ -182,8 +182,9 @@ def gexf(graph):
     out.append("</nodes><edges>")
     for i, l in enumerate(graph["links"]):
         typed = l.get("predicate") and l["predicate"] != "co_mentioned"
+        edge_type = ' type="directed"' if typed else ""
         out.append(f'<edge id="e{i}" source="{xesc(l["source"])}" target="{xesc(l["target"])}" weight="{l.get("weight") or 1}"'
-                   f'{" type=\"directed\"" if typed else ""} label="{xesc(l.get("predicate_fa") or "")}"><attvalues>'
+                   f'{edge_type} label="{xesc(l.get("predicate_fa") or "")}"><attvalues>'
                    f'<attvalue for="predicate" value="{xesc(l.get("predicate") or "")}"/></attvalues></edge>')
     out.append("</edges></graph></gexf>")
     return "\n".join(out)
