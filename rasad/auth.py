@@ -118,7 +118,8 @@ def update_user(uid, body):
             c.execute(f"UPDATE users SET {','.join(sets)} WHERE id=?", (*args, uid))
             if body.get("password") or body.get("active") is False:
                 c.execute("DELETE FROM sessions WHERE user_id=?", (uid,))
-        c.execute("DELETE FROM api_tokens WHERE user_id=?", (uid,))
+            if body.get("password") or body.get("active") is False or "role" in body:
+                c.execute("DELETE FROM api_tokens WHERE user_id=?", (uid,))
     return public(db.q1("SELECT * FROM users WHERE id=?", (uid,)))
 
 

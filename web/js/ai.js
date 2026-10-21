@@ -93,6 +93,7 @@ export async function renderSettings({ view, side }) {
   view.innerHTML = `<div class="grid" style="grid-template-columns:1.1fr 1fr">
    <div class="card"><h3>✦ اتصال مدل زبانی <span class="r"><span class="dot ${c.enabled && c.base_url ? "succeeded" : "failed"}"></span> ${c.enabled && c.base_url ? "فعال" : "غیرفعال"}</span></h3>
      <div class="form">
+       <label>خروجی ساخت‌یافته سخت‌گیرانه (فقط فراهم‌کننده سازگار) <input type="checkbox" id="aStrict" ${c.structured_outputs ? "checked" : ""}></label>
        <label>فعال‌سازی هوش مصنوعی <input type="checkbox" id="aEn" ${c.enabled ? "checked" : ""}></label>
        <label>آدرس پایه (OpenAI-compatible)<input type="text" id="aUrl" value="${esc(c.base_url)}" dir="ltr"></label>
        <label>مدل اصلی<select id="aModel"><option>${esc(c.model)}</option></select></label>
@@ -127,7 +128,7 @@ export async function renderSettings({ view, side }) {
   ag.setOption({ grid: { left: 80, right: 10, top: 6, bottom: 20 }, tooltip: { ...baseTooltip() }, xAxis: { type: "value", inverse: true, axisLabel: { color: T().muted }, splitLine: { lineStyle: { color: T().line } } },
     yAxis: { type: "category", data: ba.map((x) => x.agent), axisLabel: { color: T().muted, fontFamily: "Inter" } }, series: [{ type: "bar", data: ba.map((x) => x.tokens), itemStyle: { color: "#5E9FE8", borderRadius: 3 } }] });
   const collect = () => {
-    const b = { enabled: $("#aEn").checked, base_url: $("#aUrl").value.trim(), model: $("#aModel").value, fallback_model: $("#aFb").value, daily_budget: parseInt($("#aBud").value) || 0, temperature: parseFloat($("#aTemp").value) || 0.2, rpm: parseInt($("#aRpm").value) || 20,
+    const b = { structured_outputs: $("#aStrict").checked, enabled: $("#aEn").checked, base_url: $("#aUrl").value.trim(), model: $("#aModel").value, fallback_model: $("#aFb").value, daily_budget: parseInt($("#aBud").value) || 0, temperature: parseFloat($("#aTemp").value) || 0.2, rpm: parseInt($("#aRpm").value) || 20,
       agents: Object.fromEntries($$("[data-ag]", view).map((x) => [x.dataset.ag, x.checked])) };
     if ($("#aKey").value.trim()) b.api_key = $("#aKey").value.trim();
     return b;
@@ -143,7 +144,7 @@ export function storyAiCard(s) {
   const has = a.summary_fa || a.arc_fa || (a.framing || []).length || a.consensus_fa;
   const ph = PHASE[a.phase];
   return `<div class="card ai-card" style="margin-top:var(--gap)"><h3><span class="ai-badge">✦ تحلیل هوش مصنوعی</span>${ph ? `<span class="chip"><span class="sw" style="background:${ph[1]}"></span>${ph[0]}</span>` : ""}
-     <span class="r"><button class="btn" id="deepBtn">${a.deep ? "نمایش تحلیل عمیق" : "تحلیل عمیق ✦"}</button></span></h3>
+     <span class="r"><a class="btn" href="#/analysis/${encodeURIComponent(s.id)}/story">تحلیل مستند و دفتر شواهد</a> <button class="btn" id="deepBtn">${a.deep ? "نمایش تحلیل عمیق" : "تحلیل عمیق ✦"}</button></span></h3>
    ${has ? `${a.headline_fa ? `<div style="font-weight:600;margin-bottom:6px">${esc(a.headline_fa)}</div>` : ""}
      ${a.summary_fa ? `<p style="margin:0 0 8px;line-height:1.9">${esc(a.summary_fa)}</p>` : ""}
      ${a.arc_fa ? `<div class="h-sec" style="margin-top:8px">روایت تحول</div><p class="small" style="line-height:1.9;margin:0">${esc(a.arc_fa)}</p>` : ""}
@@ -152,7 +153,7 @@ export function storyAiCard(s) {
      ${a.consensus_fa ? `<div class="small" style="margin-top:8px"><b>اجماع منابع:</b> ${esc(a.consensus_fa)}</div>` : ""}${a.gaps_fa ? `<div class="small"><b>شکاف‌ها:</b> ${esc(a.gaps_fa)}</div>` : ""}
      ${(s.llm_entities || []).length ? `<div class="h-sec">موجودیت‌های کشف‌شده با مدل</div><div style="display:flex;gap:5px;flex-wrap:wrap">${s.llm_entities.map((e) => `<a class="chip" href="#/graph/${encodeURIComponent(e.id)}">${esc(e.name_fa)} <span class="dim">${esc(e.type)}</span></a>`).join("")}</div>` : ""}`
     : '<p class="small muted">این داستان هنوز توسط عامل‌های هوشمند پردازش نشده؛ می‌توانید تحلیل عمیق را همین حالا اجرا کنید.</p>'}
-   <div id="deepOut"></div></div>`;
+   <p class="small dim">تحلیل سریع قدیمی، صحت خارجی را تأیید نمی‌کند و کنترل محل دقیق نقل‌قول ندارد. مسیر «تحلیل مستند» برای بازبینی و انتشار کنترل‌شده است.</p><div id="deepOut"></div></div>`;
 }
 export function bindStoryAi(s, root) {
   const btn = $("#deepBtn", root); if (!btn) return;

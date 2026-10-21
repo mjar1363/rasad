@@ -8,9 +8,11 @@ import { renderExplore } from "./explore.js";
 import { renderAdmin, renderWatch } from "./admin.js";
 import { authStatus, showLogin, renderUserMenu, applyRole } from "./auth.js";
 import { can } from "./core.js";
+import { renderAnalysis } from "./analysis.js";
 
 const I = (d) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
 const ROUTES = [
+  { id: "analysis", fa: "تحلیل مستند و شواهد", icon: I('<path d="M6 3h9l4 4v14H6zM9 11h7M9 15h7"/>'), render: renderAnalysis, noDrawer: true },
   { id: "command", fa: "اتاق فرمان", icon: I('<rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/>'), render: V.renderCommand },
   { id: "map", fa: "کره و نقشه رویدادها", icon: I('<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>'), render: V.renderMap, noDrawer: true },
   { id: "graph", fa: "گراف دانش", icon: I('<circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="7" r="2.5"/><circle cx="12" cy="18" r="2.5"/><path d="M8 7l7.5.5M7.5 8l3.5 8M16.8 9.2 13.3 16"/>'), render: renderGraph, noDrawer: true },

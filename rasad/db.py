@@ -100,7 +100,7 @@ def connect():
     return c
 
 
-MIGRATIONS = [("stories", "ai", "TEXT"), ("claims", "method", "TEXT"), ("signals", "ai", "TEXT")]
+MIGRATIONS = [("stories", "ai", "TEXT"), ("claims", "method", "TEXT"), ("signals", "ai", "TEXT"), ("chats", "user_id", "INTEGER")]
 
 
 def init():
@@ -115,6 +115,8 @@ def init():
     from . import auth, notify, triage, watch  # noqa: E402  (module schemas)
     for m in (auth, notify, watch, triage):
         m.init()
+    from .analysis import store
+    store.init()
 
 
 def checkpoint():

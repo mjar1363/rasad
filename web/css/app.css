@@ -456,3 +456,13 @@ code{font:12px ui-monospace,monospace;background:var(--panel2);padding:1px 5px;b
 .bulk[hidden]{display:none}
 @media (max-width:900px){.view{overflow-x:hidden;max-width:100vw}.page-h{flex-wrap:wrap}.seg{flex-wrap:wrap}.card-h.filters>*{flex:1 1 auto}
   #killBtn{font-size:11.5px;padding:0 8px}#killBtn::before{content:none}.kpi-strip .ks{min-width:0}}
+
+/* Evidence workspace: readable sources, compact forms and bounded audit panels. */
+.evidence-workspace{overflow-wrap:anywhere}
+.evidence-workspace .form{grid-template-columns:1fr}
+.evidence-workspace .form label{grid-template-columns:180px minmax(0,1fr)}
+.evidence-workspace textarea{min-height:96px;font:14px/1.9 Vazirmatn,Inter;resize:vertical}
+.evidence-workspace input[type=number]{font:inherit;color:var(--text);background:var(--panel2);border:1px solid var(--line2);border-radius:var(--r-sm);padding:5px 9px;max-width:160px}
+.evidence-workspace pre{max-height:400px;overflow:auto;direction:rtl}
+.evidence-workspace button:disabled{opacity:.45;cursor:not-allowed}
+@media(max-width:650px){.evidence-workspace .form label{grid-template-columns:1fr;gap:5px}}

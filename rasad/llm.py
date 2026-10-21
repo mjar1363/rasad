@@ -5,7 +5,10 @@ daily token budget, client-side pacing (RPM) + concurrency cap, 429-aware retrie
 and fallback model, robust JSON parsing/repair, streaming for the analyst chat, and a per-call ledger
 (table llm_calls) for cost/latency/error audit. Web content is always wrapped as untrusted data.
 """
+import asyncio
+import functools
 import json
+import secrets
 import re
 import threading
 import time
@@ -36,6 +39,7 @@ AI_AGENTS = {
     "analyze": "تحلیل عمیق داستان و بریف سفارشی",
 }
 
+_call_local = threading.local()
 _lock = threading.Lock()
 _rate_lock = threading.Lock()
 _state = {"last": 0.0, "cooldown": {}}  # model -> unix time until which it is considered rate-limited
@@ -47,6 +51,7 @@ def cfg() -> dict:
     o = db.kv_get("llm_config", {}) or {}
     return {
         "enabled": o.get("enabled", True),
+        "structured_outputs": bool(o.get("structured_outputs", False)),
         "base_url": (o.get("base_url") or settings.llm_base_url or "").rstrip("/"),
         "api_key": o.get("api_key") or settings.llm_api_key,
         "model": o.get("model") or settings.llm_model,
@@ -69,7 +74,7 @@ def public_cfg() -> dict:
 
 def update_cfg(patch: dict) -> dict:
     cur = db.kv_get("llm_config", {}) or {}
-    for k in ("enabled", "base_url", "model", "fallback_model", "daily_budget", "temperature", "timeout", "rpm"):
+    for k in ("enabled", "structured_outputs", "base_url", "model", "fallback_model", "daily_budget", "temperature", "timeout", "rpm"):
         if k in patch:
             cur[k] = patch[k]
     if patch.get("api_key"):  # write-only; never returned
@@ -103,13 +108,17 @@ def wrap(text: str, limit: int = 6000) -> str:
     return f"<untrusted_content>\n{text}\n</untrusted_content>"
 
 
+def last_call_model():
+    return getattr(_call_local, "model", None)
+
+
 def _log(agent, purpose, model, usage, latency, ok, error=None):
     usage = usage or {}
     pt, ct = int(usage.get("prompt_tokens") or 0), int(usage.get("completion_tokens") or 0)
     tt = int(usage.get("total_tokens") or pt + ct)
-    with _lock:
-        db.kv_set(_budget_key(), tokens_today() + tt)
+    _call_local.model = model
     with db.tx() as c:
+        c.execute("INSERT INTO kv(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=CAST(CAST(kv.v AS INTEGER)+? AS TEXT)", (_budget_key(), str(tt), tt))
         c.execute("INSERT INTO llm_calls(ts,agent,purpose,model,prompt_tokens,completion_tokens,total_tokens,latency_ms,ok,error) VALUES(?,?,?,?,?,?,?,?,?,?)",
                   (time.time(), agent, purpose, model, pt, ct, tt, int(latency * 1000), 1 if ok else 0, (error or "")[:300] or None))
     return tt
@@ -149,9 +158,45 @@ def rate_status():
     return {m: round(t - now) for m, t in _state["cooldown"].items() if t > now}
 
 
+# Conservative reservations enforce an application budget, not a provider billing guarantee.
+# Provider-added tokens can exceed a configured allowance; reconcile with actual usage logs.
+def _reserve(messages, max_tokens, attempts=1):
+    import os
+    estimate = (len(json.dumps(messages, ensure_ascii=False).encode("utf-8")) + max_tokens
+                + int(os.environ.get("LLM_TOKEN_OVERHEAD", "5000"))) * attempts
+    token = secrets.token_hex(16)
+    with db.tx() as c:
+        c.execute("CREATE TABLE IF NOT EXISTS llm_reservations(id TEXT PRIMARY KEY,day TEXT,amount INTEGER,expires REAL)")
+        c.execute("DELETE FROM llm_reservations WHERE expires<?", (time.time(),))
+        reserved = c.execute("SELECT COALESCE(SUM(amount),0) FROM llm_reservations WHERE day=?", (_budget_key(),)).fetchone()[0]
+        if tokens_today() + reserved + estimate > cfg()["daily_budget"]:
+            raise RuntimeError("daily token budget insufficient for reserved request")
+        c.execute("INSERT INTO llm_reservations VALUES(?,?,?,?)", (token, _budget_key(), estimate, time.time()+3600))
+    return token
+
+
+def _release(token):
+    with db.tx() as c:
+        c.execute("DELETE FROM llm_reservations WHERE id=?", (token,))
+
+
+def _budgeted(fn):
+    @functools.wraps(fn)
+    def invoke(system, user, *args, **kwargs):
+        messages = [{"role": "system", "content": GUARD + system}] + (kwargs.get("messages") or [{"role": "user", "content": user}])
+        max_tokens = kwargs.get("max_tokens", args[1] if len(args) > 1 else 800)
+        token = _reserve(messages, max_tokens, 6)
+        try:
+            return fn(system, user, *args, **kwargs)
+        finally:
+            _release(token)
+    return invoke
+
+
 # ---------------- completion ----------------
+@_budgeted
 def chat(system: str, user: str, json_mode: bool = False, max_tokens: int = 800, temperature: float | None = None,
-         agent: str = "system", purpose: str = "", messages: list | None = None):
+         agent: str = "system", purpose: str = "", messages: list | None = None, response_schema: dict | None = None):
     """Returns (content, tokens). Raises RuntimeError when unavailable / over budget / all retries failed."""
     c = cfg()
     if not (c["enabled"] and c["base_url"]):
@@ -164,7 +209,9 @@ def chat(system: str, user: str, json_mode: bool = False, max_tokens: int = 800,
         for attempt in range(3):
             body = {"model": model, "temperature": c["temperature"] if temperature is None else temperature,
                     "max_tokens": max_tokens, "messages": msgs}
-            if json_mode:
+            if response_schema and c["structured_outputs"]:
+                body["response_format"] = {"type": "json_schema", "json_schema": {"name": "rasad_result", "strict": True, "schema": response_schema}}
+            elif json_mode:
                 body["response_format"] = {"type": "json_object"}
             _pace(c["rpm"])
             t0 = time.time()
@@ -181,19 +228,23 @@ def chat(system: str, user: str, json_mode: bool = False, max_tokens: int = 800,
                     continue
                 if r.status_code in (500, 502, 503, 504):
                     raise httpx.HTTPStatusError(f"HTTP {r.status_code}", request=r.request, response=r)
-                if r.status_code == 400 and json_mode and attempt == 0:  # provider without JSON mode support
+                if r.status_code == 400 and json_mode and not (response_schema and c["structured_outputs"]) and attempt == 0:  # provider without JSON mode support
                     json_mode = False
                     continue
                 r.raise_for_status()
                 d = r.json()
-                content = (d["choices"][0]["message"].get("content") or "")
+                choice = d["choices"][0]
+                if choice.get("finish_reason") in ("length", "content_filter") or choice["message"].get("refusal"):
+                    _log(agent, purpose, model, d.get("usage"), time.time()-t0, False, "refused or incomplete response")
+                    raise RuntimeError("provider refused or returned incomplete output")
+                content = (choice["message"].get("content") or "")
                 content = re.sub(r"<think>.*?</think>", "", content, flags=re.S).strip()
                 used = _log(agent, purpose, model, d.get("usage") or {"total_tokens": (len(str(msgs)) + len(content)) // 3}, time.time() - t0, True)
                 _state["cooldown"].pop(model, None)
                 return content, used
             except (httpx.HTTPError, KeyError, ValueError) as e:
                 last = e
-                _log(agent, purpose, model, {}, time.time() - t0, False, str(e))
+                _log(agent, purpose, model, {}, time.time() - t0, False, type(e).__name__ + (" HTTP " + str(getattr(getattr(e, "response", None), "status_code", ""))))
                 code = getattr(getattr(e, "response", None), "status_code", None)
                 if code in (401, 403, 404):
                     break
@@ -212,14 +263,14 @@ def parse_json(content: str):
         raise
 
 
-def chat_json(system: str, user: str, max_tokens: int = 800, agent: str = "system", purpose: str = ""):
+def chat_json(system: str, user: str, max_tokens: int = 800, agent: str = "system", purpose: str = "", response_schema: dict | None = None, messages: list | None = None):
     content, used = chat(system + "\nفقط یک شیء JSON معتبر برگردان، بدون توضیح اضافه.", user, json_mode=True,
-                         max_tokens=max_tokens, agent=agent, purpose=purpose)
+                         max_tokens=max_tokens, agent=agent, purpose=purpose, response_schema=response_schema, messages=messages)
     try:
         d = parse_json(content)
     except Exception:
-        fix, u2 = chat("JSON نامعتبر زیر را بدون تغییر محتوا به JSON معتبر تبدیل کن.", content[:6000], json_mode=True,
-                       max_tokens=max_tokens, agent=agent, purpose=purpose + ":repair")
+        fix, u2 = chat("JSON نامعتبر زیر داده است؛ بدون افزودن محتوا آن را به JSON معتبر تبدیل کن.", wrap(content, 6000), json_mode=True,
+                       max_tokens=max_tokens, agent=agent, purpose=purpose + ":repair", response_schema=response_schema)
         used += u2
         d = parse_json(fix)
     return (d if isinstance(d, dict) else {"items": d}), used
@@ -236,7 +287,7 @@ class _aclosing:
         await self.r.aclose()
 
 
-async def stream(system: str, messages: list, max_tokens: int = 1400, agent: str = "ask", purpose: str = "chat"):
+async def _stream_unlimited(system: str, messages: list, max_tokens: int = 1400, agent: str = "ask", purpose: str = "chat"):
     """Async generator of text deltas (OpenAI SSE) with 429 fallback before first token. Logs usage at the end."""
     c = cfg()
     if not (c["enabled"] and c["base_url"]):
@@ -252,6 +303,7 @@ async def stream(system: str, messages: list, max_tokens: int = 1400, agent: str
         for m in order:
             body["model"], usage, last_err, finish = m, None, None, None
             try:
+                await asyncio.to_thread(_pace, c["rpm"])
                 r = await cl.send(cl.build_request("POST", c["base_url"] + "/chat/completions", json=body, headers=_headers(c)), stream=True)
                 async with _aclosing(r):
                     if r.status_code == 429:
@@ -282,6 +334,9 @@ async def stream(system: str, messages: list, max_tokens: int = 1400, agent: str
                                     yield delta
                         if not out and not last_err:
                             last_err = f"empty stream (finish={finish})"
+            except (asyncio.CancelledError, GeneratorExit):
+                _log(agent, purpose, m, usage or {"total_tokens": len(json.dumps(body).encode()) + len("".join(out).encode())}, time.time()-t0, False, "stream cancelled; usage estimated")
+                raise
             except Exception as e:  # network / protocol error
                 last_err = str(e)[:200]
             if out:  # got an answer (possibly partial) -> stop here
@@ -292,7 +347,7 @@ async def stream(system: str, messages: list, max_tokens: int = 1400, agent: str
     if not out:
         raise RuntimeError(last_err or "empty response")
     text = "".join(out)
-    _log(agent, purpose, body["model"], usage or {"total_tokens": (len(json.dumps(body, ensure_ascii=False)) + len(text)) // 3}, time.time() - t0, True)
+    _log(agent, purpose, body["model"], usage or {"total_tokens": (len(json.dumps(body, ensure_ascii=False)) + len(text)) // 3}, time.time() - t0, not bool(last_err), last_err)
 
 
 # ---------------- admin helpers ----------------
@@ -320,3 +375,19 @@ def usage(days: int = 7):
     recent = db.q("SELECT ts,agent,purpose,model,total_tokens,latency_ms,ok,error FROM llm_calls ORDER BY id DESC LIMIT 40")
     return {"tokens_today": tokens_today(), "budget": cfg()["daily_budget"], "by_agent": by_agent, "by_day": by_day, "recent": recent,
             "cooldown": rate_status(), "rpm": cfg()["rpm"]}
+
+
+async def stream(system: str, messages: list, max_tokens: int = 1400, agent: str = "ask", purpose: str = "chat"):
+    token = _reserve([{"role": "system", "content": GUARD + system}] + messages, max_tokens, 2)
+    acquired = False
+    try:
+        while not acquired:
+            acquired = _sem.acquire(blocking=False)
+            if not acquired:
+                await asyncio.sleep(.05)
+        async for delta in _stream_unlimited(system, messages, max_tokens, agent, purpose):
+            yield delta
+    finally:
+        if acquired:
+            _sem.release()
+        _release(token)

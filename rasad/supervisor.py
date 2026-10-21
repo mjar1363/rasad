@@ -303,7 +303,9 @@ class Supervisor:
                 c.execute("UPDATE briefs SET status=? WHERE id=?", (status, bid))
             elif kind == "alerts":
                 status = {"approve": "approved", "reject": "dismissed", "skip": "pending", "hold": "pending"}[decision]
-                c.execute("UPDATE signals SET status=? WHERE status='pending'", (status,))
+                ids = appr.get("signal_ids") or []
+                if ids:
+                    c.execute("UPDATE signals SET status=? WHERE status='pending' AND id IN (" + ",".join("?" for _ in ids) + ")", (status, *ids))
         if decision == "approve":
             bus.publish({"type": "toast", "level": "success", "msg": "بریف منتشر شد" if kind == "writer" else "هشدارهای بحرانی تأیید شد"})
             from . import notify

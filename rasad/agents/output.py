@@ -42,7 +42,7 @@ class AnalystWriter(Agent):
             lines.append(f"- **{title}** — {TOPICS.get(s['category'], {}).get('fa', '')} · {s['source_count']} منبع · "
                          f"[{tag}] اطمینان {CONF.get(v.get('confidence'), 'پایین')} {cites}"
                          + (" · ⚠️ تکذیب/تناقض گزارش شده" if v.get("contradictions") else ""))
-        sigs = db.q("SELECT * FROM signals WHERE created>? AND status IN ('new','approved','pending') ORDER BY score DESC LIMIT 6", (since,))
+        sigs = db.q("SELECT * FROM signals WHERE created>? AND status IN ('new','approved') ORDER BY score DESC LIMIT 6", (since,))
         watch = [f"- {g['label']} (z/نسبت = {g['score']}، پایه {g['baseline']}) — [استنباط] اطمینان {'بالا' if g['severity'] == 'critical' else 'متوسط'}" for g in sigs]
         unc = [f"- {s['title_fa'] or s['title']}: فقط {(db.jload(s['verification'], {}) or {}).get('independent_sources', 1)} منبع مستقل"
                for s in stories if (db.jload(s["verification"], {}) or {}).get("independent_sources", 1) < 2][:5]
@@ -70,11 +70,17 @@ class AnalystWriter(Agent):
                         sec += [f"### {a.get('heading', '').strip()}", t, ""]
                 if sec:
                     ai_md += ["## تحلیل", *sec]
-                kj = [k for k in (d.get("key_judgments") or []) if k][:5]
+                kj = []
+                for k in (d.get("key_judgments") or [])[:5]:
+                    guarded, dd = ai.citation_guard(str(k), n); dropped += dd
+                    if guarded:
+                        kj.append(guarded)
                 if kj:
                     ai_md += ["## داوری‌های کلیدی", *[f"- {k}" for k in kj], ""]
                 if d.get("outlook"):
-                    ai_md += ["## چشم‌انداز ۲۴ تا ۷۲ ساعت", d["outlook"].strip(), ""]
+                    outlook, dd = ai.citation_guard(d["outlook"].strip(), n); dropped += dd
+                    if outlook:
+                        ai_md += ["## چشم‌انداز ۲۴ تا ۷۲ ساعت", outlook, ""]
                 ai_used = True
             except Exception as e:
                 ctx.log(f"LLM writer: {e}", "warn")
@@ -84,6 +90,7 @@ class AnalystWriter(Agent):
               f"پرتکرارترین حوزه: {TOPICS.get(top_cat, {}).get('fa', '—')}. [واقعیت مستند] اطمینان بالا (شمارش سامانه)", ""]
         if ai_md:
             md += ai_md + [f"> متن تحلیلی بالا را مدل زبانی ({llm.cfg()['model']}) نوشته است؛ {dropped} جمله فاقد ارجاع معتبر حذف شد. بخش‌های بعدی را سامانه به‌صورت قطعی تولید کرده است.", ""]
+        md += ["> این بریف قدیمی کنترل شماره ارجاع دارد، نه اعتبارسنجی نقل‌قول و استلزام. برای تحلیل ممیزی‌پذیر از نمای تحلیل مستند استفاده کنید.", ""]
         md += ["## نکات کلیدی", *lines, "", "## چه چیزی را باید پایید", *(watch or ["- سیگنال معناداری ثبت نشد."]), "",
                "## عدم‌قطعیت‌ها", *(unc or ["- همه داستان‌های برتر حداقل دو منبع مستقل دارند."]), "", "## منابع"]
         md += [f"{i+1}. [{r['title']}]({r['url']}) — {r['sname']} · {fmt_t(r['published_at'])}" for i, r in enumerate(refs)]
