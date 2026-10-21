@@ -75,20 +75,37 @@ def call(jid, stage, system, payload, contract, max_tokens=3000):
     checkpoint(jid)
     # No character truncation: the caller supplies a bounded, explicitly recorded chunk set.
     text = db.jdump(payload)
+    cfg = llm.cfg()
+    identity = [PROMPT_VERSION, system, text, contract.model_json_schema(), max_tokens,
+                {k: cfg.get(k) for k in ("model", "fallback_model", "base_url", "temperature", "structured_outputs")}]
+    cache_key = store.digest(db.jdump(identity))
+    cached = db.q1("SELECT result FROM analysis_stage_results WHERE job_id=? AND cache_key=?", (jid, cache_key))
+    if cached:
+        return contract.model_validate(db.jload(cached["result"])).model_dump()
     data, used = llm.chat_json(system, llm.wrap(text, len(text) + 1), max_tokens=max_tokens,
                                agent="analyze", purpose="evidence:" + stage,
                                response_schema=contract.model_json_schema())
-    result = contract.model_validate(data)
-    checkpoint(jid)
-    cfg = llm.cfg()
+    validation_error = None
+    try:
+        result = contract.model_validate(data)
+    except ValueError as e:
+        result, validation_error = None, e
     url = urlsplit(cfg["base_url"])
     endpoint = urlunsplit((url.scheme, url.netloc.split("@")[-1], url.path, "", ""))
+    # Record a completed, billable call even if cancellation arrived while waiting.
     with db.tx() as c:
+        if not c.execute("SELECT 1 FROM analysis_jobs WHERE id=?", (jid,)).fetchone():
+            raise Cancelled()
         c.execute("INSERT INTO analysis_calls VALUES(?,?,?,?,?,?,?,?,?,?)",
-                  (store.uid("ac_"), jid, stage, PROMPT_VERSION, store.digest(text),
+                  (store.uid("ac_"), jid, stage + (":invalid_schema" if validation_error else ""), PROMPT_VERSION, store.digest(text),
                    llm.last_call_model() or cfg["model"], endpoint,
                    "json_schema" if cfg.get("structured_outputs") else "json_validated_locally", used, time.time()))
         c.execute("UPDATE analysis_jobs SET tokens=tokens+? WHERE id=?", (used, jid))
+        if result is not None:
+            c.execute("INSERT OR IGNORE INTO analysis_stage_results VALUES(?,?,?,?,?)", (jid, cache_key, stage, result.model_dump_json(), time.time()))
+    checkpoint(jid)
+    if validation_error:
+        raise validation_error
     return result.model_dump()
 
 
@@ -112,7 +129,9 @@ def _manifest(job, user):
             continue
     chunks, coverage = retrieval.select(docs, req["question"], req["max_chunks"])
     meta = [{"id": did, "title": store.document(did, user)["title"], "metadata": store.document(did, user)["metadata"]} for did in docs]
-    return {**coverage, "documents": meta, "chunk_ids": [c["id"] for c in chunks],
+    from . import verification
+    provenance = verification.graph(docs, user)
+    return {**coverage, "documents": meta, "provenance": provenance, "chunk_ids": [c["id"] for c in chunks],
             "processed_chunk_ids": [], "prompt_version": PROMPT_VERSION,
             "external_verification": "not_performed", "source_independence": "not_established",
             "limits": {"claims_per_batch": 12, "observations_per_batch": 12, "synthesis_claims": 40, "statements": 16}}
@@ -141,6 +160,8 @@ def process(jid):
         user["role"] = account["role"]
     job["request"] = db.jload(job["request"], {})
     manifest = db.jload(job["manifest"], {}) or _manifest(job, user)
+    for doc in manifest["documents"]:
+        store.document(doc["id"], user)
     checkpoint(jid, manifest=manifest, status="extracting")
     chunks = {cid: db.q1("SELECT * FROM document_chunks WHERE id=?", (cid,)) for cid in manifest["chunk_ids"]}
     extracted = db.jload(job["extraction"], [])
@@ -295,11 +316,17 @@ async def worker():
 
 def review(report_id, body, user):
     report = store.get_report(report_id, user)
+    from . import reports
+    reports.check_reviewer(report, user)
     if report["revision"] != body.revision:
         raise ValueError("نسخه گزارش تغییر کرده است")
     if body.decision == "approve" and not report["quality"]["passed"]:
         raise ValueError("گزارش کنترل کیفیت را نگذرانده است")
     with db.tx() as c:
+        report = store.get_report(report_id, user)
+        reports.check_reviewer(report, user)
+        if body.decision == "approve" and not report["quality"]["passed"]:
+            raise ValueError("گزارش کنترل کیفیت را نگذرانده است")
         row = c.execute("SELECT status,revision FROM analysis_reports WHERE id=?", (report_id,)).fetchone()
         if row["status"] != "draft" or row["revision"] != body.revision:
             raise ValueError("این نسخه قبلاً تصمیم‌گیری شده است")
@@ -307,6 +334,7 @@ def review(report_id, body, user):
                   ("approved" if body.decision == "approve" else "rejected", report_id, body.revision)).rowcount
         if changed != 1:
             raise ValueError("تصمیم همزمان ثبت شده است")
+        c.execute("UPDATE analysis_jobs SET updated=? WHERE id=?", (time.time(), report["job_id"]))
         c.execute("INSERT INTO analysis_reviews(report_id,revision,actor_id,decision,note,created) VALUES(?,?,?,?,?,?)",
                   (report_id, body.revision, user["id"], body.decision, body.note, time.time()))
     db.audit(auth.actor(), "analysis:review", report_id, {"decision": body.decision})
@@ -315,12 +343,21 @@ def review(report_id, body, user):
 
 def publish(report_id, user):
     report = store.get_report(report_id, user)
+    if not store.allowed(report, user):
+        raise KeyError(report_id)
+    from . import reports
+    reports.check_approval(report)
     if report["status"] != "approved" or not report["quality"]["passed"]:
         raise ValueError("ابتدا کنترل کیفیت و تأیید انسانی لازم است")
     from .. import supervisor
     if supervisor.get().killed:
         raise ValueError("توقف اضطراری فعال است")
     with db.tx() as c:
+        current = store.get_report(report_id, user)
+        reports.check_approval(current)
+        if current["revision"] != report["revision"] or not current["quality"]["passed"]:
+            raise ValueError("نسخه گزارش تغییر کرده است")
+        c.execute("UPDATE analysis_jobs SET updated=? WHERE id=?", (time.time(), report["job_id"]))
         if c.execute("UPDATE analysis_reports SET status='published',published=? WHERE id=? AND status='approved'", (time.time(), report_id)).rowcount != 1:
             raise ValueError("وضعیت گزارش تغییر کرده است")
     db.audit(auth.actor(), "analysis:publish", report_id)
